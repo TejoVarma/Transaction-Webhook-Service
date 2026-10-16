@@ -1,8 +1,21 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
-app = FastAPI(title="Transaction Webhook Service")
+from app.db import engine
+from app.models import Base
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    await engine.dispose()
+
+
+app = FastAPI(title="Transaction Webhook Service", lifespan=lifespan)
 
 
 def utc_now_iso() -> str:
