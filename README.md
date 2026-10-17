@@ -13,6 +13,7 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 - [How it works](#how-it-works)
 - [API](#api)
 - [Running locally](#running-locally)
+- [Deployment](#deployment)
 - [Testing](#testing)
 - [Technical choices](#technical-choices)
 - [Configuration](#configuration)
@@ -114,6 +115,18 @@ Returns a one-item list, as in the spec. `404` if the ID is unknown.
 {"status": "HEALTHY", "current_time": "2026-10-17T10:30:00Z"}
 ```
 
+A **liveness** check: it doesn't touch the database, so a database problem never makes the
+platform restart a healthy process.
+
+### `GET /ready`
+
+```json
+{"status": "READY", "current_time": "2026-10-17T10:30:00Z"}
+```
+
+A **readiness** check: it runs `SELECT 1` and returns `503 {"status": "UNAVAILABLE"}` if the
+database can't be reached. It is not rate limited.
+
 ---
 
 ## Running locally
@@ -141,6 +154,29 @@ docker run --env-file .env -p 8000:8000 transaction-webhook-service
 
 ---
 
+## Deployment
+
+Deployed as a Docker web service on **Render**, with **Neon** Postgres, both in **Singapore**, so
+each database round trip takes a few milliseconds.
+
+1. **Database (Neon):** create a project in AWS Asia Pacific (Singapore). Copy the *direct*
+   connection string (connection pooling off). The app removes `sslmode`/`channel_binding` from
+   the URL itself and applies SSL through the driver.
+2. **Service (Render):** New → Web Service → this repository. Settings:
+   - Language **Docker**, branch `main`, region **Singapore**
+   - Environment variable `DATABASE_URL` = the Neon string (everything else has defaults; see
+     [Configuration](#configuration))
+   - Health check path `/`, auto-deploy on commit
+3. **Keep-alive:** an uptime job on [cron-job.org](https://cron-job.org) calls `GET /ready` every 4
+   minutes, which keeps both the free Render instance and the scale-to-zero Neon database awake
+   (see [Known limitations](#known-limitations-and-next-steps)).
+4. **Verify:** `python scripts/smoke_test.py <live-url>`
+
+On shutdown (every deploy), the app releases the leases of transactions it was still processing,
+so the new instance picks them up immediately instead of waiting for the leases to expire.
+
+---
+
 ## Testing
 
 ### Automated tests
@@ -154,7 +190,7 @@ pytest -v
 The tests use a 2-second processing delay instead of 30 seconds so the suite runs quickly. Every
 test starts with an empty table.
 
-**27 tests**, grouped by what they prove:
+**29 tests**, grouped by what they prove:
 
 | Area | What is tested |
 |---|---|
@@ -171,7 +207,18 @@ test starts with an empty table.
 | Retry | the first attempt fails, the retry succeeds, and the error is cleared |
 | Give up | after the maximum number of attempts, the transaction is `FAILED` with the error recorded |
 | Rate limiting | burst allowed then refused; tokens refill over time; separate buckets per client; idle clients are forgotten; API returns `429` with `Retry-After`; health check is never limited |
-| Health | `GET /` returns `HEALTHY` with a UTC timestamp |
+| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't |
+
+### Smoke test against a running deployment
+
+```bash
+python scripts/smoke_test.py <live-url>          # standard library only, nothing to install
+```
+
+It checks, in order: `GET /` and `GET /ready`; a webhook answered with `202` within 500 ms; a
+repeat flagged as a duplicate; 10 simultaneous duplicates giving exactly one new transaction; the
+lookup showing `PROCESSING`; `404` for an unknown ID; `422` for an invalid amount; and, after
+waiting 35 s, the transaction `PROCESSED`. It exits non-zero if any check fails.
 
 ### Manual test against the live service
 
@@ -395,7 +442,9 @@ are in Singapore, so each database round trip takes a few milliseconds.
   the edge (an API gateway or WAF) or in a shared store such as Redis.
 - **Schema is created with `create_all`.** Fine for one table; a growing schema should use Alembic
   migrations.
-- **Free hosting tiers.** Render's free instance sleeps after 15 minutes without traffic, so an
-  external uptime check pings `GET /` to keep it awake. Neon's free database also sleeps when
-  idle, so the first request after a quiet period can be slower. A paid always-on instance
-  removes both.
+- **Free hosting tiers.** Render's free instance sleeps after 15 minutes without traffic, and Neon's
+  free database suspends after 5 idle minutes; waking either can push the next request past
+  500 ms. An external uptime check (cron-job.org) calls `GET /ready` every 4 minutes, which keeps
+  both awake because `/ready` touches the database. Keeping Neon awake around the clock uses about 6
+  of its 100 free compute-hours a day, so outside a review period the ping moves to `GET /` (Render
+  only). A paid always-on instance and database remove the need for this.

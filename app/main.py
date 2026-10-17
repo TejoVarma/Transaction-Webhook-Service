@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.config import settings
 from app.db import engine, worker_engine
@@ -62,3 +63,19 @@ async def rate_limit(request: Request, call_next):
 @app.get("/")
 async def health_check():
     return {"status": "HEALTHY", "current_time": utc_now_iso()}
+
+
+@app.get("/ready")
+async def readiness_check():
+    # Unlike "/", this touches the database, so an uptime ping here also keeps
+    # a scale-to-zero database (Neon) awake.
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        logging.getLogger(__name__).exception("Readiness check failed")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "UNAVAILABLE", "current_time": utc_now_iso()},
+        )
+    return {"status": "READY", "current_time": utc_now_iso()}
