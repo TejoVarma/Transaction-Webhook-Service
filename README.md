@@ -16,7 +16,7 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 
 ## Contents
 
-- [Try it](#try-it)
+- [For reviewers](#for-reviewers)
 - [How it works](#how-it-works)
 - [API](#api)
 - [Running locally](#running-locally)
@@ -30,37 +30,84 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 
 ---
 
-## Try it
+## For reviewers
 
-### In the browser (no tools needed)
+Everything below runs against the live service. The database starts empty.
 
-1. Open **https://transaction-webhook-service-qgm4.onrender.com/docs**
-2. Expand **`POST /v1/webhooks/transactions`**, click **Try it out**, keep or edit the example
-   body, then click **Execute**. The response is `202` with `"duplicate": false`.
-3. Click **Execute** again with the same body: still `202`, now with `"duplicate": true`.
-4. Expand **`GET /v1/transactions/{transaction_id}`**, click **Try it out**, enter the same
-   `transaction_id`, and click **Execute**: `PROCESSING` straight away, `PROCESSED` about 30
-   seconds later.
+> **Use a new `transaction_id` for each fresh test**, for example `txn_review_01`, `txn_review_02`.
+> An ID that has already been sent is (correctly) treated as a duplicate, so the brief's example ID
+> only behaves like a new transaction the first time anyone sends it.
 
-### From the command line
+### Option 1: in the browser (no tools needed)
+
+1. Open **https://transaction-webhook-service-qgm4.onrender.com/docs**.
+2. Expand **`POST /v1/webhooks/transactions`** and click **Try it out**. The body is pre-filled
+   with the brief's example; change `transaction_id` to a new value, then click **Execute**.
+   Expect **`202`** with `{"status": "ACCEPTED", ..., "duplicate": false}`.
+3. Click **Execute** again with the same body. Expect **`202`** again, now with
+   `"duplicate": true`: nothing new is stored or processed.
+4. Expand **`GET /v1/transactions/{transaction_id}`**, click **Try it out**, enter the same ID,
+   and click **Execute**. Expect a one-item list with `"status": "PROCESSING"` and
+   `"processed_at": null`.
+5. Wait about 30 seconds and execute it again. Expect `"status": "PROCESSED"`, with `processed_at`
+   about 30 s after `created_at`.
+6. Expand **`GET /`** and execute it. Expect `{"status": "HEALTHY", "current_time": "...Z"}`.
+
+### Option 2: command line (curl)
 
 ```bash
-BASE=https://transaction-webhook-service-qgm4.onrender.com   # or http://localhost:8000
+BASE=https://transaction-webhook-service-qgm4.onrender.com
+ID=txn_review_$(date +%s)          # a fresh ID every run
 
-# 1. Send a webhook: answered immediately with 202
-curl -i -X POST $BASE/v1/webhooks/transactions \
+# 1. Webhook: 202 straight away (time_total is the full round trip from your machine)
+curl -s -w "  -> HTTP %{http_code} in %{time_total}s\n" -X POST $BASE/v1/webhooks/transactions \
   -H "Content-Type: application/json" \
-  -d '{"transaction_id":"txn_abc123def456","source_account":"acc_user_789","destination_account":"acc_merchant_456","amount":1500,"currency":"INR"}'
+  -d "{\"transaction_id\":\"$ID\",\"source_account\":\"acc_user_789\",\"destination_account\":\"acc_merchant_456\",\"amount\":1500,\"currency\":\"INR\"}"
 
-# 2. Send the same webhook again: still 202, flagged as a duplicate, not processed twice
-#    {"status":"ACCEPTED","transaction_id":"txn_abc123def456","duplicate":true}
+# 2. Same webhook again: 202, "duplicate": true
+curl -s -X POST $BASE/v1/webhooks/transactions -H "Content-Type: application/json" \
+  -d "{\"transaction_id\":\"$ID\",\"source_account\":\"acc_user_789\",\"destination_account\":\"acc_merchant_456\",\"amount\":1500,\"currency\":\"INR\"}"; echo
 
-# 3. Check status: PROCESSING now, PROCESSED about 30 seconds later
-curl $BASE/v1/transactions/txn_abc123def456
+# 3. Status now: PROCESSING, processed_at null
+curl -s $BASE/v1/transactions/$ID; echo
 
-# Health check
-curl $BASE/
+# 4. Status after the 30-second processing delay: PROCESSED
+sleep 32; curl -s $BASE/v1/transactions/$ID; echo
+
+# 5. Health check
+curl -s $BASE/; echo
 ```
+
+### Option 3: one command that checks everything
+
+```bash
+python scripts/smoke_test.py https://transaction-webhook-service-qgm4.onrender.com     # standard library only, ~40 s
+```
+
+It sends a webhook and checks the 202 and the 500 ms limit, a repeat, 10 simultaneous duplicates,
+the `PROCESSING` → `PROCESSED` transition after the delay, plus `404` and `422` handling. It prints
+PASS/FAIL per check.
+
+### How each part of the brief is met
+
+| Brief | Requirement | How to check (live) | Expected |
+|---|---|---|---|
+| 1. API | `POST /v1/webhooks/transactions` with the given body | Option 1 step 2 / Option 2 step 1 | `202 Accepted` |
+| 1. API | `GET /` health check | Option 1 step 6 / Option 2 step 5 | `{"status":"HEALTHY","current_time":"<UTC>Z"}` |
+| 1. API | `GET /v1/transactions/{id}` | Option 1 steps 4–5 / Option 2 steps 3–4 | one-item list with all fields from the brief |
+| 2. Response | `202` within 500 ms, simple acknowledgement | `time_total` in Option 2 step 1; `Server-Timing` response header | ~5–20 ms inside the app (`Server-Timing: app;dur=…`); total = that + network to Singapore |
+| 3. Background | processed after a 30 s delay, stored persistently | Option 2 steps 3–4 | `PROCESSING` → `PROCESSED`; `processed_at` ≈ `created_at` + 30 s; stored in Postgres |
+| 4. Idempotency | same `transaction_id` → one processed transaction, no errors | Option 1 step 3 / Option 2 step 2 / smoke test | `202` with `"duplicate": true`; still one transaction |
+| 5. Storage | status and timing stored | Option 2 step 4 | `status`, `created_at`, `processed_at` |
+| Success 1 | single transaction processed after ~30 s | Option 2 steps 1–4 | `PROCESSED` ~30 s later |
+| Success 2 | duplicates processed once | smoke test (10 simultaneous duplicates) | exactly one `"duplicate": false` |
+| Success 3 | fast under processing load | send webhooks while others are processing; `scripts/burst_test.py`, `scripts/loadtest.py` | still `202` with ~5 ms in the app ([live results](#local-vs-live-performance)) |
+| Success 4 | errors handled, nothing lost | bad body → `422`, unknown ID → `404`; database unreachable → `503` (not stored, so the sender retries); crash recovery and retries are covered by the [automated tests](#automated-tests) | no `500`s; every `202` is stored and processed |
+
+**Notes on timing.** The service runs in Singapore, so total response time includes the network
+from wherever you are (~60–150 ms per round trip from India during testing). The `Server-Timing`
+header on every response shows the time spent inside the app alone. The free Render instance is
+kept awake by an uptime ping, so there is no cold start.
 
 ---
 
@@ -242,7 +289,7 @@ waiting 35 s, the transaction `PROCESSED`. It exits non-zero if any check fails.
 
 ### Manual test against the live service
 
-Use the commands in [Try it](#try-it). To see duplicate protection under concurrency:
+Use the steps in [For reviewers](#for-reviewers). To see duplicate protection under concurrency:
 
 ```bash
 for i in $(seq 1 10); do

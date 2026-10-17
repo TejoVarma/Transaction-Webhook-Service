@@ -26,6 +26,21 @@ CurrencyCode = Annotated[
 
 
 class WebhookPayload(BaseModel):
+    # Pre-fills the request body on /docs with the example from the brief.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "transaction_id": "txn_abc123def456",
+                    "source_account": "acc_user_789",
+                    "destination_account": "acc_merchant_456",
+                    "amount": 1500,
+                    "currency": "INR",
+                }
+            ]
+        }
+    )
+
     transaction_id: Identifier
     source_account: Identifier
     destination_account: Identifier

@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +52,9 @@ async def receive_transaction_webhook(
 
 @router.get("/transactions/{transaction_id}", response_model=list[TransactionOut])
 async def get_transaction(
-    transaction_id: str,
+    transaction_id: str = Path(
+        openapi_examples={"brief example": {"value": "txn_abc123def456"}}
+    ),
     session: AsyncSession = Depends(get_session),
 ):
     transaction = await session.get(Transaction, transaction_id)
