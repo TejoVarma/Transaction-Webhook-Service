@@ -114,6 +114,18 @@ Returns a one-item list, as in the spec. `404` if the ID is unknown.
 {"status": "HEALTHY", "current_time": "2026-10-17T10:30:00Z"}
 ```
 
+A **liveness** check: it doesn't touch the database, so a database problem never makes the
+platform restart a healthy process.
+
+### `GET /ready`
+
+```json
+{"status": "READY", "current_time": "2026-10-17T10:30:00Z"}
+```
+
+A **readiness** check: it runs `SELECT 1` and returns `503 {"status": "UNAVAILABLE"}` if the
+database can't be reached. It is not rate limited.
+
 ---
 
 ## Running locally
@@ -154,7 +166,7 @@ pytest -v
 The tests use a 2-second processing delay instead of 30 seconds so the suite runs quickly. Every
 test starts with an empty table.
 
-**27 tests**, grouped by what they prove:
+**29 tests**, grouped by what they prove:
 
 | Area | What is tested |
 |---|---|
@@ -171,7 +183,7 @@ test starts with an empty table.
 | Retry | the first attempt fails, the retry succeeds, and the error is cleared |
 | Give up | after the maximum number of attempts, the transaction is `FAILED` with the error recorded |
 | Rate limiting | burst allowed then refused; tokens refill over time; separate buckets per client; idle clients are forgotten; API returns `429` with `Retry-After`; health check is never limited |
-| Health | `GET /` returns `HEALTHY` with a UTC timestamp |
+| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't |
 
 ### Manual test against the live service
 
@@ -395,7 +407,9 @@ are in Singapore, so each database round trip takes a few milliseconds.
   the edge (an API gateway or WAF) or in a shared store such as Redis.
 - **Schema is created with `create_all`.** Fine for one table; a growing schema should use Alembic
   migrations.
-- **Free hosting tiers.** Render's free instance sleeps after 15 minutes without traffic, so an
-  external uptime check pings `GET /` to keep it awake. Neon's free database also sleeps when
-  idle, so the first request after a quiet period can be slower. A paid always-on instance
-  removes both.
+- **Free hosting tiers.** Render's free instance sleeps after 15 minutes without traffic, and Neon's
+  free database suspends after 5 idle minutes; waking either can push the next request past
+  500 ms. An external uptime check (cron-job.org) calls `GET /ready` every 4 minutes, which keeps
+  both awake because `/ready` touches the database. Keeping Neon awake around the clock uses about 6
+  of its 100 free compute-hours a day, so outside a review period the ping moves to `GET /` (Render
+  only). A paid always-on instance and database remove the need for this.
