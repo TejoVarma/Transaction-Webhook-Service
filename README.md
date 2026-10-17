@@ -2,9 +2,15 @@
 
 Webhook service that accepts payment transactions instantly (202) and processes them reliably in the background, with idempotency and crash recovery. FastAPI + PostgreSQL.
 
-- **Live API:** https://transaction-webhook-service-qgm4.onrender.com
-- **Interactive API docs (try every endpoint in the browser):** https://transaction-webhook-service-qgm4.onrender.com/docs
-- **Health check:** https://transaction-webhook-service-qgm4.onrender.com/
+**Live API (base URL):** https://transaction-webhook-service-qgm4.onrender.com
+
+| Endpoint | Live URL |
+|---|---|
+| Health check | `GET https://transaction-webhook-service-qgm4.onrender.com/` |
+| Transaction webhook | `POST https://transaction-webhook-service-qgm4.onrender.com/v1/webhooks/transactions` |
+| Transaction status | `GET https://transaction-webhook-service-qgm4.onrender.com/v1/transactions/{transaction_id}` |
+| Readiness (checks the database) | `GET https://transaction-webhook-service-qgm4.onrender.com/ready` |
+| **Interactive docs**: try every endpoint in the browser | https://transaction-webhook-service-qgm4.onrender.com/docs |
 
 ---
 
