@@ -13,6 +13,7 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 - [How it works](#how-it-works)
 - [API](#api)
 - [Running locally](#running-locally)
+- [Deployment](#deployment)
 - [Testing](#testing)
 - [Technical choices](#technical-choices)
 - [Configuration](#configuration)
@@ -153,6 +154,29 @@ docker run --env-file .env -p 8000:8000 transaction-webhook-service
 
 ---
 
+## Deployment
+
+Deployed as a Docker web service on **Render**, with **Neon** Postgres, both in **Singapore**, so
+each database round trip takes a few milliseconds.
+
+1. **Database (Neon):** create a project in AWS Asia Pacific (Singapore). Copy the *direct*
+   connection string (connection pooling off). The app removes `sslmode`/`channel_binding` from
+   the URL itself and applies SSL through the driver.
+2. **Service (Render):** New → Web Service → this repository. Settings:
+   - Language **Docker**, branch `main`, region **Singapore**
+   - Environment variable `DATABASE_URL` = the Neon string (everything else has defaults; see
+     [Configuration](#configuration))
+   - Health check path `/`, auto-deploy on commit
+3. **Keep-alive:** an uptime job on [cron-job.org](https://cron-job.org) calls `GET /ready` every 4
+   minutes, which keeps both the free Render instance and the scale-to-zero Neon database awake
+   (see [Known limitations](#known-limitations-and-next-steps)).
+4. **Verify:** `python scripts/smoke_test.py <live-url>`
+
+On shutdown (every deploy), the app releases the leases of transactions it was still processing,
+so the new instance picks them up immediately instead of waiting for the leases to expire.
+
+---
+
 ## Testing
 
 ### Automated tests
@@ -184,6 +208,17 @@ test starts with an empty table.
 | Give up | after the maximum number of attempts, the transaction is `FAILED` with the error recorded |
 | Rate limiting | burst allowed then refused; tokens refill over time; separate buckets per client; idle clients are forgotten; API returns `429` with `Retry-After`; health check is never limited |
 | Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't |
+
+### Smoke test against a running deployment
+
+```bash
+python scripts/smoke_test.py <live-url>          # standard library only, nothing to install
+```
+
+It checks, in order: `GET /` and `GET /ready`; a webhook answered with `202` within 500 ms; a
+repeat flagged as a duplicate; 10 simultaneous duplicates giving exactly one new transaction; the
+lookup showing `PROCESSING`; `404` for an unknown ID; `422` for an invalid amount; and, after
+waiting 35 s, the transaction `PROCESSED`. It exits non-zero if any check fails.
 
 ### Manual test against the live service
 
