@@ -4,7 +4,7 @@ from contextlib import suppress
 
 from sqlalchemy import text
 
-from app.db import SessionLocal
+from app.db import WorkerSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class TransactionWorker:
 
         if interrupted:
             try:
-                async with SessionLocal() as session:
+                async with WorkerSessionLocal() as session:
                     await session.execute(RELEASE_LEASES, {"transaction_ids": interrupted})
                     await session.commit()
                 logger.info("Released %d in-flight transactions on shutdown", len(interrupted))
@@ -124,7 +124,7 @@ class TransactionWorker:
         self._slots.release()
 
     async def _claim_next(self) -> tuple[str, int] | None:
-        async with SessionLocal() as session:
+        async with WorkerSessionLocal() as session:
             row = (
                 await session.execute(CLAIM_NEXT, {"lease_seconds": self.lease_seconds})
             ).first()
@@ -135,7 +135,7 @@ class TransactionWorker:
         logger.info("Processing %s (attempt %d)", transaction_id, attempt)
         try:
             await self._call_external_service(transaction_id)
-            async with SessionLocal() as session:
+            async with WorkerSessionLocal() as session:
                 await session.execute(MARK_PROCESSED, {"transaction_id": transaction_id})
                 await session.commit()
         except asyncio.CancelledError:
@@ -152,7 +152,7 @@ class TransactionWorker:
     async def _record_failure(self, transaction_id: str, attempt: int, exc: Exception) -> None:
         retry_in = min(300, 5 * 2 ** (attempt - 1))
         try:
-            async with SessionLocal() as session:
+            async with WorkerSessionLocal() as session:
                 new_status = (
                     await session.execute(
                         RECORD_FAILURE,

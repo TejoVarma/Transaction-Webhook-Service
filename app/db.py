@@ -24,13 +24,26 @@ url, connect_args = to_asyncpg_url(settings.database_url)
 engine = create_async_engine(
     url,
     connect_args=connect_args,
+    pool_size=10,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
+
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+# The worker gets its own small pool so a burst of background work can never
+# take connections away from the webhook endpoint.
+worker_engine = create_async_engine(
+    url,
+    connect_args=connect_args,
     pool_size=5,
     max_overflow=5,
     pool_pre_ping=True,
     pool_recycle=300,
 )
 
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+WorkerSessionLocal = async_sessionmaker(worker_engine, expire_on_commit=False)
 
 
 async def get_session():
