@@ -190,7 +190,7 @@ pytest -v
 The tests use a 2-second processing delay instead of 30 seconds so the suite runs quickly. Every
 test starts with an empty table.
 
-**29 tests**, grouped by what they prove:
+**30 tests**, grouped by what they prove:
 
 | Area | What is tested |
 |---|---|
@@ -207,7 +207,7 @@ test starts with an empty table.
 | Retry | the first attempt fails, the retry succeeds, and the error is cleared |
 | Give up | after the maximum number of attempts, the transaction is `FAILED` with the error recorded |
 | Rate limiting | burst allowed then refused; tokens refill over time; separate buckets per client; idle clients are forgotten; API returns `429` with `Retry-After`; health check is never limited |
-| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't |
+| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't; every response carries a `Server-Timing` header |
 
 ### Smoke test against a running deployment
 
@@ -366,6 +366,9 @@ waiting for them to expire.
 **Retries and a terminal state.** Failures are retried with exponential backoff (5 s, 10 s, 20 s,
 ...). After `MAX_ATTEMPTS`, the row becomes `FAILED` with `last_error` saved, so nothing retries
 forever and failures stay visible.
+
+**Measurable from outside.** Every response has a `Server-Timing: app;dur=<ms>` header, so time
+spent in the app can be told apart from network and proxy time.
 
 **Few database round trips.** Each API request and worker query is one atomic statement run in
 autocommit, so there is one round trip per request instead of four (`BEGIN`/`COMMIT` and a

@@ -1,5 +1,6 @@
 import logging
 import math
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -43,6 +44,17 @@ app.state.rate_limiter = TokenBucketLimiter(
     rate=settings.rate_limit_per_second, burst=settings.rate_limit_burst
 )
 app.include_router(router)
+
+
+@app.middleware("http")
+async def server_timing(request: Request, call_next):
+    # Reports time spent inside the app, so it can be told apart from network
+    # and proxy time when measuring from outside (visible in browser devtools too).
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+    return response
 
 
 @app.middleware("http")

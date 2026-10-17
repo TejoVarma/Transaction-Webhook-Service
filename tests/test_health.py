@@ -36,3 +36,9 @@ def test_readiness_check_reports_database_outage(client, monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["status"] == "UNAVAILABLE"
+
+
+def test_responses_report_server_timing():
+    response = client.get("/")
+
+    assert response.headers["Server-Timing"].startswith("app;dur=")
