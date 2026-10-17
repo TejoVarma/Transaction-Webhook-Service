@@ -195,16 +195,28 @@ python scripts/loadtest.py http://localhost:8000 3000 20
 ab -k -n 5000 -c 100 -p body.json -T application/json http://localhost:8000/v1/webhooks/transactions
 ```
 
-Results on a laptop (single uvicorn process, local Postgres, rate limiting off for the measurement):
+Results on a laptop (single uvicorn process, local Postgres, rate limiting off for the
+measurement). Every request succeeded in every run.
 
-| Tool | Concurrency | Throughput | p50 | p95 | p99 | Max |
+| Endpoint | Concurrency | Throughput | p50 | p95 | p99 | Max |
 |---|---|---|---|---|---|---|
-| ab | 20 | ~1,860 req/s | 10 ms | 13 ms | 21 ms | 53 ms |
-| ab | 100 | ~1,870 req/s | 52 ms | 64 ms | 67 ms | 106 ms |
-| loadtest.py (unique IDs) | 20 | ~530–580 req/s | 15 ms | 126 ms | 211 ms | 399 ms |
+| `GET /` | 20 | ~7,790 req/s | 3 ms | 3 ms | 4 ms | 7 ms |
+| `GET /v1/transactions/{id}` | 20 | ~2,330 req/s | 8 ms | 11 ms | 21 ms | 147 ms |
+| `POST /v1/webhooks/transactions` | 20 | ~1,830 req/s | 10 ms | 13 ms | 23 ms | 30 ms |
+| `GET /` | 100 | ~7,710 req/s | 13 ms | 14 ms | 20 ms | 26 ms |
+| `GET /v1/transactions/{id}` | 100 | ~2,250 req/s | 41 ms | 62 ms | 81 ms | 155 ms |
+| `POST /v1/webhooks/transactions` | 100 | ~1,750 req/s | 55 ms | 71 ms | 90 ms | 127 ms |
 
-The Python client tops out well before the server does: during its runs the server process sat at
-about 6% CPU, which is why `ab` is used for the ceiling.
+The health check never touches the database, the lookup is a single primary-key read, and the
+webhook is an insert inside a transaction, which explains their order. With unique IDs, the Python
+client (`loadtest.py`) peaked at ~530–580 req/s at 20 concurrency, but that is the client's limit:
+the server process sat at about 6% CPU during those runs, which is why `ab` is used for the
+ceiling.
+
+**Rate limiter accuracy:** one client sent requests as fast as possible for 5 seconds with the
+default limits on. 64,331 were sent, **1,397 allowed** (expected: 400 burst + 200/s × 5 s =
+1,400), and the rest got `429`. Refusals are cheap (~12,000/s), so a flood can't slow the service
+down.
 
 **Processing under load:** 3,000 webhooks were accepted at ~530 req/s. The worker ran 1,000 at a
 time, and every processed transaction took exactly 30 s from receipt, on the first attempt, with
