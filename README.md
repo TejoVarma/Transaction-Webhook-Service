@@ -2,8 +2,8 @@
 
 Webhook service that accepts payment transactions instantly (202) and processes them reliably in the background, with idempotency and crash recovery. FastAPI + PostgreSQL.
 
-**Live API:** _deploying, the URL will be added here_
-**Interactive docs:** `<live-url>/docs`
+**Live API:** https://transaction-webhook-service-qgm4.onrender.com
+**Interactive docs:** https://transaction-webhook-service-qgm4.onrender.com/docs
 
 ---
 
@@ -15,6 +15,7 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 - [Running locally](#running-locally)
 - [Deployment](#deployment)
 - [Testing](#testing)
+- [Local vs live performance](#local-vs-live-performance)
 - [Technical choices](#technical-choices)
 - [Configuration](#configuration)
 - [Decisions on the spec](#decisions-on-the-spec)
@@ -25,7 +26,7 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 ## Try it
 
 ```bash
-BASE=<live-url>   # or http://localhost:8000
+BASE=https://transaction-webhook-service-qgm4.onrender.com   # or http://localhost:8000
 
 # 1. Send a webhook: answered immediately with 202
 curl -i -X POST $BASE/v1/webhooks/transactions \
@@ -190,7 +191,7 @@ pytest -v
 The tests use a 2-second processing delay instead of 30 seconds so the suite runs quickly. Every
 test starts with an empty table.
 
-**29 tests**, grouped by what they prove:
+**30 tests**, grouped by what they prove:
 
 | Area | What is tested |
 |---|---|
@@ -207,7 +208,7 @@ test starts with an empty table.
 | Retry | the first attempt fails, the retry succeeds, and the error is cleared |
 | Give up | after the maximum number of attempts, the transaction is `FAILED` with the error recorded |
 | Rate limiting | burst allowed then refused; tokens refill over time; separate buckets per client; idle clients are forgotten; API returns `429` with `Retry-After`; health check is never limited |
-| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't |
+| Health and readiness | `GET /` returns `HEALTHY` with a UTC timestamp; `GET /ready` returns `READY` when the database answers and `503 UNAVAILABLE` when it doesn't; every response carries a `Server-Timing` header |
 
 ### Smoke test against a running deployment
 
@@ -338,6 +339,49 @@ no errors.
 
 ---
 
+## Local vs live performance
+
+The same code was measured in three setups:
+
+| | Local (laptop) | Laptop app + Neon Singapore | **Live: Render free tier, Singapore** |
+|---|---|---|---|
+| Where the app runs | laptop, 1 process, a full CPU core | laptop, 1 process | Render **free** instance, **~0.1 CPU**, 512 MB |
+| Where the database is | Postgres on the same laptop (~0.1 ms away) | Neon Singapore (~110 ms away) | Neon Singapore (same region) |
+| Where requests come from | the same laptop | the same laptop | a laptop in India (~65 ms away) |
+| Webhook throughput | **~1,750–1,830 req/s** | — | **~50 req/s** (20 concurrent clients) |
+| Lookup throughput | ~2,250–2,330 req/s | — | — |
+| Whole server, mixed traffic | **~2,835 req/s** | — | — |
+| Single webhook, response time | ~10 ms | — | **130–360 ms** (including the network from India) |
+| Webhook latency under load | p95 71 ms, p99 90 ms (100 clients) | — | p50 396 ms, **p95 534 ms**, p99 709 ms (20 clients) |
+| Burst, all at the same instant | — | **5,000 / 5,000 accepted** | **300 / 300 accepted** in 7.6 s |
+| Processed exactly once, ~30 s after receipt | ✅ | ✅ | ✅ (900 / 900, 30–31 s) |
+
+**Why live is so much slower: mostly the free tier.**
+
+1. **About a tenth of the CPU.** Render's free instance gets ~0.1 CPU; the local runs had a full
+   core. The app is Python, so each request costs a little CPU (≈0.5 ms locally). On a tenth of a
+   core that becomes several milliseconds, and under load requests queue for the CPU. The
+   background worker processing earlier webhooks shares the same small slice. A ~10× drop in
+   throughput is roughly what the CPU difference predicts.
+2. **Network distance.** The live tests ran from India: every round trip to Singapore is ~65 ms,
+   and a new HTTPS connection costs ~2 more round trips before the request is sent. Locally that
+   was zero. This is a fixed cost per request, not a capacity limit.
+3. **Render's proxy.** Every live request passes through Render's load balancer, which adds a
+   hop the local runs didn't have.
+4. **Logging.** Render logs every request, and on a tenth of a core that is not free.
+
+Every response carries a `Server-Timing: app;dur=<ms>` header, so live measurements can separate
+time spent in the app from network and proxy time.
+
+**What it means for the requirements.** Single requests and bursts are well within 500 ms. Only
+sustained back-to-back load on the free instance pushes the slowest ~5% of webhooks past it.
+Nothing is ever lost: every accepted webhook was stored and processed exactly once. On a paid
+instance (Render Starter ~0.5 CPU, Standard 1 CPU) throughput should scale roughly with the CPU,
+towards the local figures. The rate limit (200 req/s per client) is above what the free instance
+can serve, so it never triggered live. It was verified locally (1,397 allowed vs 1,400 expected).
+
+---
+
 ## Technical choices
 
 **FastAPI + async SQLAlchemy (asyncpg).** The processing step is almost entirely waiting, so an
@@ -366,6 +410,9 @@ waiting for them to expire.
 **Retries and a terminal state.** Failures are retried with exponential backoff (5 s, 10 s, 20 s,
 ...). After `MAX_ATTEMPTS`, the row becomes `FAILED` with `last_error` saved, so nothing retries
 forever and failures stay visible.
+
+**Measurable from outside.** Every response has a `Server-Timing: app;dur=<ms>` header, so time
+spent in the app can be told apart from network and proxy time.
 
 **Few database round trips.** Each API request and worker query is one atomic statement run in
 autocommit, so there is one round trip per request instead of four (`BEGIN`/`COMMIT` and a
