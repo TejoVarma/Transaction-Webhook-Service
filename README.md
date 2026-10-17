@@ -219,17 +219,27 @@ stored can be compared with the number accepted.
 Setup: app on a laptop in India, database on **Neon in Singapore** (~110 ms per round trip), rate
 limiting off.
 
-| Burst size | Accepted | Time for all to be answered | Rows stored | Processed afterwards |
+| Burst size | Accepted | Time for all to be answered | Rows stored | Peak DB connections |
 |---|---|---|---|---|
-| 100 | **100 / 100** | 1.8 s | 100 | all, exactly once |
-| 500 | **500 / 500** | 2.4 s | 500 | all, exactly once |
-| 1,000 | **1,000 / 1,000** | 3.7 s | 1,000 | all, exactly once |
-| 2,000 | 1,973 / 2,000 | 10.1 s | 1,973 | all, exactly once |
+| 100 | **100 / 100** | 1.8 s | 100 | |
+| 500 | **500 / 500** | 2.4 s | 500 | |
+| 1,000 | **1,000 / 1,000** | 3.7 s | 1,000 | |
+| 2,000 | **2,000 / 2,000** | 7.3 s | 2,000 | 61 |
+| 3,000 | **3,000 / 3,000** | 11.0 s | 3,000 | 74 |
+| 5,000 | **5,000 / 5,000** | 18.2 s | 5,000 | 70 |
 
-Stored always equals accepted: there are no lost or phantom transactions. The few requests not
-accepted at 2,000 never reached the app. macOS limits the queue of pending TCP connections to 128
-(`kern.ipc.somaxconn`) and refused them, which shows up as `ConnectError` on the client. Linux
-servers use a much larger default.
+Stored always equals accepted, with no lost or phantom transactions, and the processed rows were
+each processed exactly once. (macOS's default limit of 128 pending TCP connections,
+`kern.ipc.somaxconn`, refuses part of a burst above ~1,000 before it reaches the app. These runs
+used `sudo sysctl -w kern.ipc.somaxconn=4096`. Linux servers use a much larger default.)
+
+**Database connections.** One instance opens at most 80 connections: the API pool (40 + 20
+overflow) plus the worker pool (10 + 10). Requests beyond that wait in line for a pooled
+connection instead of opening new ones, so a 5,000-request burst peaked at 74 against Neon's limit
+of 901. A request that waits more than 30 s for a connection gets `503` (not stored, so the sender
+retries). From this laptop that would start somewhere above ~8,000 simultaneous requests. Neon's
+limit only matters when running many instances (~11 at 80 each); beyond that, Neon's built-in
+PgBouncer pooler endpoint can handle thousands of client connections.
 
 With rate limiting **on** (defaults), a burst of 1,000 from one client got 417 accepted (the
 400-request burst allowance plus refill) and 583 `429 Too Many Requests` responses with
