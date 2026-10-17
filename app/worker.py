@@ -1,0 +1,175 @@
+import asyncio
+import logging
+from contextlib import suppress
+
+from sqlalchemy import text
+
+from app.db import SessionLocal
+
+logger = logging.getLogger(__name__)
+
+CLAIM_NEXT = text("""
+    UPDATE transactions
+    SET locked_until = now() + make_interval(secs => :lease_seconds),
+        attempts = attempts + 1
+    WHERE transaction_id = (
+        SELECT transaction_id
+        FROM transactions
+        WHERE status = 'PROCESSING'
+          AND (locked_until IS NULL OR locked_until < now())
+        ORDER BY created_at
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING transaction_id, attempts
+""")
+
+MARK_PROCESSED = text("""
+    UPDATE transactions
+    SET status = 'PROCESSED', processed_at = now(), locked_until = NULL, last_error = NULL
+    WHERE transaction_id = :transaction_id AND status = 'PROCESSING'
+""")
+
+RECORD_FAILURE = text("""
+    UPDATE transactions
+    SET status = CASE WHEN attempts >= :max_attempts THEN 'FAILED' ELSE status END,
+        locked_until = CASE
+            WHEN attempts >= :max_attempts THEN NULL
+            ELSE now() + make_interval(secs => :retry_in)
+        END,
+        last_error = :error
+    WHERE transaction_id = :transaction_id AND status = 'PROCESSING'
+    RETURNING status
+""")
+
+RELEASE_LEASES = text("""
+    UPDATE transactions
+    SET locked_until = NULL, attempts = attempts - 1
+    WHERE transaction_id = ANY(:transaction_ids) AND status = 'PROCESSING'
+""")
+
+
+class TransactionWorker:
+    def __init__(
+        self,
+        *,
+        processing_delay: float,
+        concurrency: int,
+        idle_poll_seconds: float,
+        max_attempts: int,
+    ):
+        self.processing_delay = processing_delay
+        self.idle_poll_seconds = idle_poll_seconds
+        self.max_attempts = max_attempts
+        # Long enough to cover the simulated call plus slow DB round trips.
+        self.lease_seconds = processing_delay + 90
+
+        self._wake = asyncio.Event()
+        self._slots = asyncio.Semaphore(concurrency)
+        self._in_flight: dict[str, asyncio.Task] = {}
+        self._runner: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._runner = asyncio.create_task(self._run(), name="transaction-worker")
+
+    def notify(self) -> None:
+        self._wake.set()
+
+    async def stop(self) -> None:
+        if self._runner:
+            self._runner.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._runner
+
+        interrupted = list(self._in_flight)
+        for task in self._in_flight.values():
+            task.cancel()
+        await asyncio.gather(*self._in_flight.values(), return_exceptions=True)
+
+        if interrupted:
+            try:
+                async with SessionLocal() as session:
+                    await session.execute(RELEASE_LEASES, {"transaction_ids": interrupted})
+                    await session.commit()
+                logger.info("Released %d in-flight transactions on shutdown", len(interrupted))
+            except Exception:
+                logger.exception("Could not release leases; they will expire on their own")
+
+    async def _run(self) -> None:
+        while True:
+            await self._slots.acquire()
+            # Clear before looking, so a webhook arriving mid-claim still wakes us.
+            self._wake.clear()
+            try:
+                claimed = await self._claim_next()
+            except Exception:
+                self._slots.release()
+                logger.exception("Worker could not reach the database, retrying in 5s")
+                await asyncio.sleep(5)
+                continue
+
+            if claimed is None:
+                self._slots.release()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), timeout=self.idle_poll_seconds)
+                continue
+
+            transaction_id, attempt = claimed
+            task = asyncio.create_task(self._process(transaction_id, attempt))
+            self._in_flight[transaction_id] = task
+            task.add_done_callback(lambda _, tid=transaction_id: self._done(tid))
+
+    def _done(self, transaction_id: str) -> None:
+        self._in_flight.pop(transaction_id, None)
+        self._slots.release()
+
+    async def _claim_next(self) -> tuple[str, int] | None:
+        async with SessionLocal() as session:
+            row = (
+                await session.execute(CLAIM_NEXT, {"lease_seconds": self.lease_seconds})
+            ).first()
+            await session.commit()
+        return (row.transaction_id, row.attempts) if row else None
+
+    async def _process(self, transaction_id: str, attempt: int) -> None:
+        logger.info("Processing %s (attempt %d)", transaction_id, attempt)
+        try:
+            await self._call_external_service(transaction_id)
+            async with SessionLocal() as session:
+                await session.execute(MARK_PROCESSED, {"transaction_id": transaction_id})
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Processing failed for %s", transaction_id)
+            await self._record_failure(transaction_id, attempt, exc)
+            return
+        logger.info("Processed %s", transaction_id)
+
+    async def _call_external_service(self, transaction_id: str) -> None:
+        await asyncio.sleep(self.processing_delay)
+
+    async def _record_failure(self, transaction_id: str, attempt: int, exc: Exception) -> None:
+        retry_in = min(300, 5 * 2 ** (attempt - 1))
+        try:
+            async with SessionLocal() as session:
+                new_status = (
+                    await session.execute(
+                        RECORD_FAILURE,
+                        {
+                            "transaction_id": transaction_id,
+                            "max_attempts": self.max_attempts,
+                            "retry_in": retry_in,
+                            "error": f"{type(exc).__name__}: {exc}"[:500],
+                        },
+                    )
+                ).scalar_one_or_none()
+                await session.commit()
+        except Exception:
+            logger.exception("Could not record failure for %s; lease expiry will retry it", transaction_id)
+            return
+
+        if new_status == "FAILED":
+            logger.error("Giving up on %s after %d attempts", transaction_id, attempt)
+        else:
+            asyncio.get_running_loop().call_later(retry_in + 1, self.notify)
