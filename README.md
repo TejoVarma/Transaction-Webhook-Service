@@ -217,6 +217,12 @@ clients (about a third each), while the worker processed the incoming webhooks:
 | `POST /v1/webhooks/transactions` | 8,590 | ~860 req/s | 37 ms | 49 ms | 64 ms | 86 ms | 0 |
 | **Total** | **28,347** | **~2,835 req/s** | | | | **86 ms** | **0** |
 
+> **Reading these numbers honestly:** the database was local, so each round trip took ~0.1 ms;
+> on Render with Neon (same region) expect ~1–5 ms. `ab` sends the same body every time, so after
+> the first request the POST rows measure the duplicate path (no new row written). Inserting
+> unique transactions costs somewhat more. `ab` also reuses connections (`-k`). Treat these
+> numbers as the app's ceiling, not production figures.
+
 The health check never touches the database, the lookup is a single primary-key read, and the
 webhook is an insert inside a transaction, which explains their order. With unique IDs, the Python
 client (`loadtest.py`) peaked at ~530–580 req/s at 20 concurrency, but that is the client's limit:
