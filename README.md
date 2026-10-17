@@ -52,7 +52,7 @@ curl $BASE/
                                                      3. reply 202, typically in ~10 ms
 
  Background worker (runs inside the same app, started at startup)
-                                                     a. claim a row:  FOR UPDATE SKIP LOCKED + a time-limited lease
+                                                     a. claim up to 100 rows: FOR UPDATE SKIP LOCKED + a time-limited lease
                                                      b. simulated external call (30 s)
                                                      c. mark PROCESSED, set processed_at
                                                      d. on error: retry with backoff; after 5 attempts, mark FAILED
@@ -195,7 +195,9 @@ python scripts/loadtest.py http://localhost:8000 3000 20
 ab -k -n 5000 -c 100 -p body.json -T application/json http://localhost:8000/v1/webhooks/transactions
 ```
 
-Results on a laptop (single uvicorn process, local Postgres, rate limiting off for the measurement):
+Results on a laptop (single uvicorn process, local Postgres, rate limiting off for the measurement).
+Measured before the round-trip optimisations described under the burst test, so these are
+conservative:
 
 | Tool | Concurrency | Throughput | p50 | p95 | p99 | Max |
 |---|---|---|---|---|---|---|
@@ -280,8 +282,8 @@ two simultaneous duplicates both get through; the primary key makes that impossi
 instances are running. Duplicates still get `202`, because senders retry on errors and a 4xx/5xx
 would just cause more retries.
 
-**Safe concurrent workers: `FOR UPDATE SKIP LOCKED` + leases.** A worker claims a row in one
-statement that also sets `locked_until` (a lease) and increments `attempts`. Other workers skip
+**Safe concurrent workers: `FOR UPDATE SKIP LOCKED` + leases.** A worker claims up to 100 rows
+in one statement that also sets `locked_until` (a lease) and increments `attempts`. Other workers skip
 locked rows, and a lease that runs out (the worker crashed) makes the row claimable again. The
 final `UPDATE` only applies `WHERE status = 'PROCESSING'`, so finishing is idempotent too.
 On shutdown (for example during a deploy), in-flight leases are released straight away instead of
