@@ -207,6 +207,16 @@ measurement). Every request succeeded in every run.
 | `GET /v1/transactions/{id}` | 100 | ~2,250 req/s | 41 ms | 62 ms | 81 ms | 155 ms |
 | `POST /v1/webhooks/transactions` | 100 | ~1,750 req/s | 55 ms | 71 ms | 90 ms | 127 ms |
 
+**Whole server, mixed traffic:** all three endpoints hit at the same time for 10 s by 100
+clients (about a third each), while the worker processed the incoming webhooks:
+
+| Endpoint | Requests | Throughput | p50 | p95 | p99 | Max | Errors |
+|---|---|---|---|---|---|---|---|
+| `GET /` | 10,667 | ~1,070 req/s | 31 ms | 41 ms | 53 ms | 80 ms | 0 |
+| `GET /v1/transactions/{id}` | 9,090 | ~910 req/s | 35 ms | 47 ms | 62 ms | 84 ms | 0 |
+| `POST /v1/webhooks/transactions` | 8,590 | ~860 req/s | 37 ms | 49 ms | 64 ms | 86 ms | 0 |
+| **Total** | **28,347** | **~2,835 req/s** | | | | **86 ms** | **0** |
+
 The health check never touches the database, the lookup is a single primary-key read, and the
 webhook is an insert inside a transaction, which explains their order. With unique IDs, the Python
 client (`loadtest.py`) peaked at ~530–580 req/s at 20 concurrency, but that is the client's limit:
