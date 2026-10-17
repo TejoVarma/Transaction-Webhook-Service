@@ -2,8 +2,9 @@
 
 Webhook service that accepts payment transactions instantly (202) and processes them reliably in the background, with idempotency and crash recovery. FastAPI + PostgreSQL.
 
-**Live API:** https://transaction-webhook-service-qgm4.onrender.com
-**Interactive docs:** https://transaction-webhook-service-qgm4.onrender.com/docs
+- **Live API:** https://transaction-webhook-service-qgm4.onrender.com
+- **Interactive API docs (try every endpoint in the browser):** https://transaction-webhook-service-qgm4.onrender.com/docs
+- **Health check:** https://transaction-webhook-service-qgm4.onrender.com/
 
 ---
 
@@ -24,6 +25,18 @@ Webhook service that accepts payment transactions instantly (202) and processes 
 ---
 
 ## Try it
+
+### In the browser (no tools needed)
+
+1. Open **https://transaction-webhook-service-qgm4.onrender.com/docs**
+2. Expand **`POST /v1/webhooks/transactions`**, click **Try it out**, keep or edit the example
+   body, then click **Execute**. The response is `202` with `"duplicate": false`.
+3. Click **Execute** again with the same body: still `202`, now with `"duplicate": true`.
+4. Expand **`GET /v1/transactions/{transaction_id}`**, click **Try it out**, enter the same
+   `transaction_id`, and click **Execute**: `PROCESSING` straight away, `PROCESSED` about 30
+   seconds later.
+
+### From the command line
 
 ```bash
 BASE=https://transaction-webhook-service-qgm4.onrender.com   # or http://localhost:8000
