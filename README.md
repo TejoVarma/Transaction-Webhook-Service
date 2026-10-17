@@ -206,6 +206,56 @@ Results on a laptop (single uvicorn process, local Postgres, rate limiting off f
 The Python client tops out well before the server does: during its runs the server process sat at
 about 6% CPU, which is why `ab` is used for the ceiling.
 
+### Burst test: how many webhooks can arrive at the same instant
+
+```bash
+python scripts/burst_test.py http://localhost:8000 1000
+```
+
+`burst_test.py` opens N connections, holds every request at a starting line, releases them all at
+once, then reports how many were accepted. Each request has a unique ID, so the number of rows
+stored can be compared with the number accepted.
+
+Setup: app on a laptop in India, database on **Neon in Singapore** (~110 ms per round trip), rate
+limiting off.
+
+| Burst size | Accepted | Time for all to be answered | Rows stored | Peak DB connections |
+|---|---|---|---|---|
+| 100 | **100 / 100** | 1.8 s | 100 | |
+| 500 | **500 / 500** | 2.4 s | 500 | |
+| 1,000 | **1,000 / 1,000** | 3.7 s | 1,000 | |
+| 2,000 | **2,000 / 2,000** | 7.3 s | 2,000 | 61 |
+| 3,000 | **3,000 / 3,000** | 11.0 s | 3,000 | 74 |
+| 5,000 | **5,000 / 5,000** | 18.2 s | 5,000 | 70 |
+
+Stored always equals accepted, with no lost or phantom transactions, and the processed rows were
+each processed exactly once. (macOS's default limit of 128 pending TCP connections,
+`kern.ipc.somaxconn`, refuses part of a burst above ~1,000 before it reaches the app. These runs
+used `sudo sysctl -w kern.ipc.somaxconn=4096`. Linux servers use a much larger default.)
+
+**Database connections.** One instance opens at most 80 connections: the API pool (40 + 20
+overflow) plus the worker pool (10 + 10). Requests beyond that wait in line for a pooled
+connection instead of opening new ones, so a 5,000-request burst peaked at 74 against Neon's limit
+of 901. A request that waits more than 30 s for a connection gets `503` (not stored, so the sender
+retries). From this laptop that would start somewhere above ~8,000 simultaneous requests. Neon's
+limit only matters when running many instances (~11 at 80 each); beyond that, Neon's built-in
+PgBouncer pooler endpoint can handle thousands of client connections.
+
+With rate limiting **on** (defaults), a burst of 1,000 from one client got 417 accepted (the
+400-request burst allowance plus refill) and 583 `429 Too Many Requests` responses with
+`Retry-After`.
+
+**What made bursts work.** The first run accepted only 120 of 1,000: each webhook made 4 database
+round trips (connection check, `BEGIN`, `INSERT`, `COMMIT`) while holding one of 20 pooled
+connections, so requests queued for more than 30 s and got `503`. Two changes fixed it:
+
+1. **One round trip per request.** API and worker queries are each a single atomic statement, so
+   the connections run in autocommit, and the per-checkout ping was replaced with recycling
+   connections every 4 minutes, sooner than Neon's 5-minute idle suspend.
+2. **A bigger pool and batch claiming.** The API pool is 40 (+20 overflow). The worker claims up
+   to 100 jobs per `UPDATE ... FOR UPDATE SKIP LOCKED` statement instead of one, so it keeps up
+   with bursts: it processes 1,000 jobs every ~30 s cycle.
+
 **Processing under load:** 3,000 webhooks were accepted at ~530 req/s. The worker ran 1,000 at a
 time, and every processed transaction took exactly 30 s from receipt, on the first attempt, with
 no errors.
@@ -240,6 +290,11 @@ waiting for them to expire.
 **Retries and a terminal state.** Failures are retried with exponential backoff (5 s, 10 s, 20 s,
 ...). After `MAX_ATTEMPTS`, the row becomes `FAILED` with `last_error` saved, so nothing retries
 forever and failures stay visible.
+
+**Few database round trips.** Each API request and worker query is one atomic statement run in
+autocommit, so there is one round trip per request instead of four (`BEGIN`/`COMMIT` and a
+connection check are skipped). Connections are recycled every 4 minutes, before Neon's idle
+suspend could kill them. The worker claims jobs in batches of up to 100 per statement.
 
 **No database connection held while waiting.** A job claims its row, commits, waits 30 s holding
 no connection, then finishes. Holding connections through the wait would exhaust the pool under
