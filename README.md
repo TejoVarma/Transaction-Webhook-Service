@@ -351,34 +351,35 @@ The same code was measured in three setups:
 | Webhook throughput | **~1,750–1,830 req/s** | — | **~50 req/s** (20 concurrent clients) |
 | Lookup throughput | ~2,250–2,330 req/s | — | — |
 | Whole server, mixed traffic | **~2,835 req/s** | — | — |
-| Single webhook, response time | ~10 ms | — | **130–360 ms** (including the network from India) |
-| Webhook latency under load | p95 71 ms, p99 90 ms (100 clients) | — | p50 396 ms, **p95 534 ms**, p99 709 ms (20 clients) |
+| Single webhook, total response time | ~10 ms | — | **250–350 ms** from India (fresh connection each time) |
+| Single webhook, time inside the app (`Server-Timing`) | — | — | **5–18 ms** |
+| Single webhook while 200 others are processing | — | — | **264–349 ms** total, **5–6 ms** in the app |
+| Webhook latency under sustained load | p95 71 ms, p99 90 ms (100 clients) | — | p50 396 ms, **p95 534 ms**, p99 709 ms (20 clients nonstop) |
 | Burst, all at the same instant | — | **5,000 / 5,000 accepted** | **300 / 300 accepted** in 7.6 s |
 | Processed exactly once, ~30 s after receipt | ✅ | ✅ | ✅ (900 / 900, 30–31 s) |
 
-**Why live is so much slower: mostly the free tier.**
+**Why live numbers differ: two separate causes, both measured.**
 
-1. **About a tenth of the CPU.** Render's free instance gets ~0.1 CPU; the local runs had a full
-   core. The app is Python, so each request costs a little CPU (≈0.5 ms locally). On a tenth of a
-   core that becomes several milliseconds, and under load requests queue for the CPU. The
-   background worker processing earlier webhooks shares the same small slice. A ~10× drop in
-   throughput is roughly what the CPU difference predicts.
-2. **Network distance.** The live tests ran from India: every round trip to Singapore is ~65 ms,
-   and a new HTTPS connection costs ~2 more round trips before the request is sent. Locally that
-   was zero. This is a fixed cost per request, not a capacity limit.
-3. **Render's proxy.** Every live request passes through Render's load balancer, which adds a
-   hop the local runs didn't have.
-4. **Logging.** Render logs every request, and on a tenth of a core that is not free.
+1. **Single requests: almost all of it is network.** The `Server-Timing` header shows a webhook
+   takes **5–18 ms inside the app** on Render, with the database 3–4 ms away in the same region.
+   The rest of the ~250–350 ms is the trip from India to Singapore (~60–150 ms per round trip
+   during testing) plus setting up a new HTTPS connection (about two more round trips) and
+   Render's proxy. Background processing does not slow intake: a webhook sent while 200 others
+   were processing still took 5–6 ms in the app, because the 30 s waits use no CPU.
+2. **Sustained heavy load: the free instance's CPU.** Render's free tier gives ~0.1 CPU, against
+   a full core locally. Under nonstop traffic (20 concurrent clients), time inside the app rose
+   from ~10 ms to ~200 ms (p50) as requests waited for CPU, and throughput settled around
+   30–50 req/s. Running the same Docker image locally capped at `--cpus=0.1` reproduced this
+   (~20 req/s, ~600 ms p50 in the app). Turning request logging off in that setup made no
+   meaningful difference (20 vs 19 req/s), so the limit is the CPU itself, not logging.
 
-Every response carries a `Server-Timing: app;dur=<ms>` header, so live measurements can separate
-time spent in the app from network and proxy time.
-
-**What it means for the requirements.** Single requests and bursts are well within 500 ms. Only
-sustained back-to-back load on the free instance pushes the slowest ~5% of webhooks past it.
-Nothing is ever lost: every accepted webhook was stored and processed exactly once. On a paid
-instance (Render Starter ~0.5 CPU, Standard 1 CPU) throughput should scale roughly with the CPU,
-towards the local figures. The rate limit (200 req/s per client) is above what the free instance
-can serve, so it never triggered live. It was verified locally (1,397 allowed vs 1,400 expected).
+**What it means for the requirements.** Individual webhooks, bursts of hundreds, and webhooks
+arriving during background processing all stay under 500 ms, with nearly all of that being network
+time. Only nonstop high-rate traffic on the free instance pushes the slowest requests past it.
+Nothing is ever lost: every accepted webhook was stored and processed exactly once. A paid instance
+(Render Starter ~0.5 CPU, Standard 1 CPU) raises the sustained-load ceiling roughly in line with
+the CPU. The rate limit (200 req/s per client) is above what the free instance can serve, so it
+never triggered live. It was verified locally (1,397 allowed vs 1,400 expected).
 
 ---
 
