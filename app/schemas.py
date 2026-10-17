@@ -2,13 +2,26 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_serializer,
+)
 
 from app.timeutils import format_utc
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+
+
+def _clean_currency(value):
+    return value.strip().upper() if isinstance(value, str) else value
+
+
 CurrencyCode = Annotated[
-    str, StringConstraints(strip_whitespace=True, to_upper=True, pattern=r"^[A-Z]{3}$")
+    str, BeforeValidator(_clean_currency), StringConstraints(pattern=r"^[A-Z]{3}$")
 ]
 
 
